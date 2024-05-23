@@ -79,11 +79,11 @@ impl PokerGame {
         }
     }
 
-    pub fn reveal_card_game(&self, player_id: u8) -> Option<VRFProof>{
+    pub fn reveal_card_game(&self, player_id: u8) -> Option<(i32, VRFProof)>{
         let player = &self.players[&player_id];
         if let Some((card, proof)) = player.reveal_card() {
             println!("Player {} reveals card {:?} with proof {:?}", player_id, card, proof);
-            return Some(proof)
+            return Some((card, proof))
         } 
         println!("Invalid proof.");
         None
@@ -101,10 +101,18 @@ impl PokerGame {
             self.draw(id);
         }
 
+        let mut highest_card = 0;
+        let mut player_id = 0;
         let players_keys = self.players.keys().cloned().collect::<Vec<u8>>();
         for id in players_keys {
-            let vrf_proof = self.reveal_card_game(id);
-            self.verify_card_game(id, vrf_proof.unwrap())
+            let (card , vrf_proof) = self.reveal_card_game(id).unwrap();
+            self.verify_card_game(id, vrf_proof);
+
+            if card>highest_card{
+                highest_card = card;
+                player_id = id;
+            }
         }
+        println!("Player {} is the winner with card {} ", player_id, highest_card);
     }
 }

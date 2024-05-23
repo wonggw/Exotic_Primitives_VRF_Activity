@@ -1,110 +1,110 @@
-use std::io::stdin;
-use sp_core::*;
+use schnorrkel::Keypair;
+use schnorrkel::vrf::{VRFInOut, VRFProof};
+use merlin::Transcript;
+use sp_core::sr25519::vrf::VrfProof;
+use std::collections::HashMap;
 use rand::Rng;
-use schnorrkel::{
-    Keypair, signing_context,
-};
-use sha2::{Sha256, Digest};
-use crate::try_draw;
-#[derive(Debug)]
-pub struct Player {
-    pub keypair: Keypair,
-    cards: Vec<(u16, [u8; 97])>,
-    pub balance: i32,
+use rand::rngs::OsRng;
+
+// Assuming 52 Card Deck
+const DECK_SIZE: usize = 52;
+
+struct Player {
+    keypair: Keypair,
+    hand: Option<i32>,
+    proof: Option<VRFProof>,
+    transcript: Transcript,
 }
 
 impl Player {
-    pub fn new(keypair: Keypair, balance: i32) -> Self {
-        Self {
-            keypair,
-            cards: vec![],
-            balance,
+    fn new() -> Player {
+        let mut csprng = OsRng;
+        let mut seed = [0u8];
+        let mut rng = rand::thread_rng();
+        rng.fill(&mut seed[..]);
+        let mut transcript = Transcript::new(b"new player");
+        transcript.append_message(b"seed",&seed);
+
+        Player {
+            keypair: Keypair::generate_with(&mut csprng),
+            hand: None,
+            proof: None,
+            transcript: transcript,
         }
     }
-    pub fn hand_card(&mut self, cards: Vec<(u16, [u8; 97])>) {
-        self.cards = cards;
-    }
-    pub fn get_balance(&self) -> i32 {
-        self.balance
-    }
-}
 
-pub mod game_util {
-    use super::*;
-
-    pub fn sign_message(players: &Vec<Player>, message: &[u8]) -> Vec<u8> {
-        let ctx = signing_context(message);
-        players.iter().fold(Vec::new(), |mut byte, player| {
-            let mut signature_bytes = player.keypair.sign(ctx.bytes(message)).to_bytes().to_vec();
-            byte.append(&mut signature_bytes);
-            byte
-        })
+    fn random_function_card(&self, vrf_io: &VRFInOut) -> i32{
+        let card: i32 = vrf_io.as_output_bytes().iter().map(|&b| b as i32).sum();
+        card % DECK_SIZE as i32
+    }
+    
+    fn draw(&mut self) {
+        let transcript = self.transcript.clone(); 
+        let (vrf_io, vrf_proof, _) = self.keypair.vrf_sign(transcript);
+        self.proof = Some(vrf_proof);
+        self.hand = Some(self.random_function_card(&vrf_io));
     }
 
-    pub fn hash_signatures(signatures: Vec<u8>) -> [u8; 16] {
-        sp_core::blake2_128(&signatures)
+    fn reveal_card(&self) -> Option<(i32, VRFProof)> {
+        Some((self.hand.unwrap(), self.proof.as_ref().unwrap().clone()))
     }
 
-    pub fn create_players(count: i32) -> Vec<Player> {
-        let mut csprng = rand_core::OsRng;
-        (0..count)
-            .map(|_| Player::new(Keypair::generate_with(&mut csprng), 1000))
-            .collect()
+    fn verify_card(&self, vrf_proof: VRFProof) -> i32 {
+        let transcript = self.transcript.clone(); 
+        let (vrf_io, _, _) = self.keypair.vrf_sign(transcript);
+        let transcript = self.transcript.clone(); 
+        let vrf_io = self.keypair.public.vrf_verify(transcript, &vrf_io.to_preout(), &vrf_proof).unwrap().0;
+        self.random_function_card(&vrf_io)
     }
 }
 
-pub mod game_handler {
-    use super::*;
+pub struct PokerGame {
+    players: HashMap<u8, Player>,
+}
 
-    fn wait() {
-        println!("Press enter to continue...");
-        stdin().read_line(&mut String::new()).expect("error reading line");
+impl PokerGame {
+    pub fn new() -> PokerGame {
+        PokerGame {
+            players: HashMap::new(),
+        }
     }
 
-    fn bid(players: &mut [Player], bank: &mut i32) {
-        players.iter_mut().for_each(|player| {
-            let bid = rand::thread_rng().gen_range(0..301);
-            player.balance -= bid;
-            println!(
-                "Player with key {:?} made a bid of {}",
-                player.keypair.public.to_bytes(), bid
-            );
-            *bank += bid;
-        });
+    pub fn add_player(&mut self, id: u8) {
+        self.players.insert(id, Player::new());
+    }
+    
+    pub fn draw(&mut self, id: u8) {
+        if let Some(player) = self.players.get_mut(&id) {
+            player.draw();
+        }
     }
 
-    pub fn run() {
-        println!("Game starts!");
-        let mut input: String = String::new();
-        println!("Enter the number of players");
-
-        stdin().read_line(&mut input).expect("Reading string error");
-        input = input.replace('\n', "");
-        let n: i32 = input.parse().unwrap();
-
-        println!("There {} player(s) with $1000 each", n);
-
-        let mut players = game_util::create_players(n);
-
-        // Let each player sign something
-        let message: &[u8] = b"I join the table";
-        let signatures = game_util::sign_message(&players, message);
-        let vrf_seed = game_util::hash_signatures(signatures);
-
-        // Give each player 2 cards
-        players.iter_mut().for_each(|player| {
-            let cards: Vec<(u16, [u8; 97])> = (0..2)
-                .filter_map(|i| try_draw(&player.keypair, &vrf_seed, i))
-                .collect();
-            player.hand_card(cards);
-        });
-
-        let mut bank = 0;
-        println!("Players are given 2 cards each");
-        wait();
-        bid(&mut players, &mut bank);
-
-        // More game logic here such as revealing cards...
+    pub fn reveal_card_game(&self, player_id: u8) -> Option<VRFProof>{
+        let player = &self.players[&player_id];
+        if let Some((card, proof)) = player.reveal_card() {
+            println!("Player {} reveals card {:?} with proof {:?}", player_id, card, proof);
+            return Some(proof)
+        } 
+        println!("Invalid proof.");
+        None
     }
 
+    pub fn verify_card_game(&self, player_id: u8, vrf_proof: VRFProof){
+        let player = &self.players[&player_id];
+        let card = player.verify_card(vrf_proof);
+        println!("Player {} verify card is {:?} ", player_id, card);
+    }
+
+    pub fn play(&mut self) {
+        let players_keys = self.players.keys().cloned().collect::<Vec<u8>>();
+        for id in players_keys {
+            self.draw(id);
+        }
+
+        let players_keys = self.players.keys().cloned().collect::<Vec<u8>>();
+        for id in players_keys {
+            let vrf_proof = self.reveal_card_game(id);
+            self.verify_card_game(id, vrf_proof.unwrap())
+        }
+    }
 }
